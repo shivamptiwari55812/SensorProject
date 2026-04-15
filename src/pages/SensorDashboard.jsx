@@ -56,6 +56,25 @@ const HEALTH_THRESHOLDS = {
       { min: 90, max: 95, status: 'moderate', label: 'Low' },
       { max: Infinity, status: 'high', label: 'Critical' }
     ]
+  },
+  heart_ir: {
+    label: 'Heart IR Value',
+    unit: 'mV',
+    icon: 'heart',
+    thresholds: [
+      { min: 100, max: Infinity, status: 'normal', label: 'Detected' },
+      { max: 100, status: 'moderate', label: 'Weak Signal' }
+    ]
+  },
+  irValue: {
+    label: 'IR Sensor',
+    unit: 'ADC',
+    icon: 'heart',
+    thresholds: [
+      { min: 500, status: 'normal', label: 'Strong' },
+      { min: 200, max: 500, status: 'moderate', label: 'Weak' },
+      { max: 200, status: 'high', label: 'Very Weak' }
+    ]
   }
 }
 
@@ -74,6 +93,11 @@ function getSensorStatus(value, config) {
     return { status: last.status, label: last.label }
   }
   return { status: 'high', label: 'Critical' }
+}
+
+function isValidSpO2(value) {
+  // SpO2 should be between 0 and 100, and > 0 indicates person is present
+  return typeof value === 'number' && value > 0 && value <= 100
 }
 
 function calculateEnvironmentRisk(data) {
@@ -264,13 +288,16 @@ export default function SensorDashboard() {
       const response = await fetch(FIREBASE_URL)
       if (!response.ok) throw new Error('Failed to fetch data')
       const firebaseData = await response.json()
+    console.log(firebaseData)
       setData(firebaseData)
 
       const body = firebaseData.bodyPresent ?? false
       const hr = firebaseData.heartRate ?? 0
       const spo2Val = firebaseData.spo2 ?? 0
 
-      setBodyPresent(body || (hr > 0 && spo2Val > 0))
+      // Validate SpO2 value: if valid and non-zero, it indicates a human is present
+      const isValidSpo2 = isValidSpO2(spo2Val)
+      setBodyPresent(body || isValidSpo2 || (hr > 0 && spo2Val > 0))
 
       setRiskData({
         env: calculateEnvironmentRisk(firebaseData),
@@ -347,78 +374,70 @@ export default function SensorDashboard() {
         </div>
       )}
 
-      {mode === 'environment' && (
-        <div className="mode-section">
-          <h2 className="section-header">
-            <span className="section-icon"><TempIcon /></span>
-            Environment Monitoring
-          </h2>
-          <p className="section-desc">No person detected. Showing environmental conditions only.</p>
-          <div className="sensor-grid">
-            {Object.keys(ENVIRONMENT_THRESHOLDS).map(key => {
-              const config = ENVIRONMENT_THRESHOLDS[key]
-              const value = data?.[key] ?? 0
-              const { status: sensorStatus } = getSensorStatus(value, config)
-              return (
-                <SensorCard
-                  key={key}
-                  type={key}
-                  value={value}
-                  config={config}
-                  status={sensorStatus}
-                />
-              )
-            })}
-          </div>
+      <div className="mode-section">
+        <h2 className="section-header">
+          <span className="section-icon"><HeartIcon /></span>
+          Health Vitals
+        </h2>
+        <div className="sensor-grid">
+          {['heartRate', 'spo2'].map(key => {
+            const config = HEALTH_THRESHOLDS[key]
+            const value = data?.[key] ?? 0
+            const { status: sensorStatus } = getSensorStatus(value, config)
+            return (
+              <SensorCard
+                key={key}
+                type={key}
+                value={value}
+                config={config}
+                status={sensorStatus}
+              />
+            )
+          })}
         </div>
-      )}
 
-      {mode === 'health' && (
-        <div className="mode-section">
-          <h2 className="section-header">
-            <span className="section-icon"><HeartIcon /></span>
-            Health Vitals
-          </h2>
-          <p className="section-desc">Person detected. Showing health vitals and environment data.</p>
-          <div className="sensor-grid">
-            {Object.keys(HEALTH_THRESHOLDS).map(key => {
-              const config = HEALTH_THRESHOLDS[key]
-              const value = data?.[key] ?? 0
-              const { status: sensorStatus } = getSensorStatus(value, config)
-              return (
-                <SensorCard
-                  key={key}
-                  type={key}
-                  value={value}
-                  config={config}
-                  status={sensorStatus}
-                />
-              )
-            })}
-          </div>
-
-          <h2 className="section-header" style={{ marginTop: '2rem' }}>
-            <span className="section-icon"><TempIcon /></span>
-            Environment
-          </h2>
-          <div className="sensor-grid">
-            {Object.keys(ENVIRONMENT_THRESHOLDS).map(key => {
-              const config = ENVIRONMENT_THRESHOLDS[key]
-              const value = data?.[key] ?? 0
-              const { status: sensorStatus } = getSensorStatus(value, config)
-              return (
-                <SensorCard
-                  key={key}
-                  type={key}
-                  value={value}
-                  config={config}
-                  status={sensorStatus}
-                />
-              )
-            })}
-          </div>
+        <h2 className="section-header" style={{ marginTop: '2rem' }}>
+          <span className="section-icon"><HeartIcon /></span>
+          Sensor Quality
+        </h2>
+        <div className="sensor-grid">
+          {['heart_ir', 'irValue'].map(key => {
+            const config = HEALTH_THRESHOLDS[key]
+            const value = data?.[key] ?? 0
+            const { status: sensorStatus } = getSensorStatus(value, config)
+            return (
+              <SensorCard
+                key={key}
+                type={key}
+                value={value}
+                config={config}
+                status={sensorStatus}
+              />
+            )
+          })}
         </div>
-      )}
+
+        <h2 className="section-header" style={{ marginTop: '2rem' }}>
+          <span className="section-icon"><TempIcon /></span>
+          Environment
+        </h2>
+        <div className="sensor-grid">
+          {Object.keys(ENVIRONMENT_THRESHOLDS).map(key => {
+            const config = ENVIRONMENT_THRESHOLDS[key]
+            const value = data?.[key] ?? 0
+            const { status: sensorStatus } = getSensorStatus(value, config)
+            return (
+              <SensorCard
+                key={key}
+                type={key}
+                value={value}
+                config={config}
+                status={sensorStatus}
+              />
+            )
+          })}
+        </div>
+      </div>
 
       {lastUpdated && (
         <div className="last-updated">
