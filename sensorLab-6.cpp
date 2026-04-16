@@ -3,16 +3,14 @@
 #include <DHT.h>
 #include <Wire.h>
 #include "MAX30105.h"
-#include "heartRate.h"
-#include "time.h"
+#include "spo2_algorithm.h"
 
-// WIFI
+// Firebase credentials
+#define API_KEY "AIzaSyBNvpNxWXTKTpbRnJEvOgdutVjF2rA_Okk"
+#define DATABASE_URL "https://sensorlab-6-default-rtdb.asia-southeast1.firebasedatabase.app"
+
 #define WIFI_SSID "Thousand Sunny"
 #define WIFI_PASSWORD "11111111"
-
-// Firebase
-#define API_KEY "AIzaSyBNvpNxWXTKTpbRnJEvOgdutVjF2rA_Okk"
-#define DATABASE_URL "https://sensorlab-6-default-rtdb.firebaseio.com/"
 
 #define USER_EMAIL "test@test.com"
 #define USER_PASSWORD "123456"
@@ -30,205 +28,121 @@ FirebaseConfig config;
 DHT dht(DHTPIN, DHTTYPE);
 MAX30105 particleSensor;
 
-// Heart Rate
-const byte RATE_SIZE = 4;
-byte rates[RATE_SIZE];
-byte rateSpot = 0;
-
-long lastBeat = 0;
-float beatsPerMinute;
-int beatAvg;
-
-float spo2 = 0;
-
-#define MAX_HR_VALUE 200
-#define MIN_HR_VALUE 30
-
 bool firebaseReady = false;
 
-// NTP
-const char* ntpServers[] = {
-  "pool.ntp.org",
-  "time.google.com",
-  "time.cloudflare.com"
-};
+// MAX30102 buffers
+#define BUFFER_SIZE 100
+uint32_t irBuffer[BUFFER_SIZE];
+uint32_t redBuffer[BUFFER_SIZE];
 
-void connectWiFi()
-{
-  Serial.println("Connecting WiFi...");
+int32_t spo2;
+int8_t validSPO2;
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int retry = 0;
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(500);
-    Serial.print(".");
-    retry++;
-
-    if(retry > 20)
-    {
-      Serial.println("\nRestarting WiFi...");
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      retry = 0;
-    }
-  }
-
-  Serial.println("\nWiFi Connected");
-  Serial.println(WiFi.localIP());
-}
-
-void syncTime()
-{
-  Serial.println("Syncing time...");
-
-  for(int i=0;i<3;i++)
-  {
-    configTime(0,0,ntpServers[i]);
-
-    int retry = 0;
-
-    while(time(nullptr) < 100000 && retry < 20)
-    {
-      delay(500);
-      Serial.print(".");
-      retry++;
-    }
-
-    if(time(nullptr) > 100000)
-    {
-      Serial.println("\nTime synced");
-      return;
-    }
-
-    Serial.println("\nServer failed");
-  }
-
-  Serial.println("NTP failed - using fallback time");
-}
+int32_t heartRate;
+int8_t validHeartRate;
 
 void setup()
 {
   Serial.begin(115200);
 
-  Serial.print("Free Heap: ");
-  Serial.println(ESP.getFreeHeap());
+  // WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
 
-  connectWiFi();
-  syncTime();
+  // Time
+  configTime(0, 0, "pool.ntp.org");
+  while (time(nullptr) < 100000) delay(200);
 
-  // Firebase config
+  // Firebase
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
-
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
 
   Firebase.reconnectWiFi(true);
-
-  fbdo.setBSSLBufferSize(2048,512);
-  fbdo.setResponseSize(1024);
-
   Firebase.begin(&config, &auth);
 
-  firebaseReady = Firebase.ready();
+  fbdo.setBSSLBufferSize(4096, 1024);
+  fbdo.setResponseSize(4096);
 
-  Serial.println(firebaseReady ? "Firebase Ready" : "Firebase Starting");
+  firebaseReady = Firebase.ready();
+  Serial.println(firebaseReady ? "Firebase Ready" : "Firebase Failed");
 
   // Sensors
   dht.begin();
+  Wire.begin(21, 22);
 
-  Wire.begin(21,22);
-
-  if(!particleSensor.begin(Wire, I2C_SPEED_STANDARD))
-  {
+  // MAX30102 setup
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
     Serial.println("MAX30102 NOT FOUND");
-  }
-  else
-  {
-    Serial.println("MAX30102 Ready");
+    while (1);
   }
 
-  particleSensor.setPulseAmplitudeRed(0x0A);
+  Serial.println("MAX30102 Initialized");
+
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x1F);
+  particleSensor.setPulseAmplitudeIR(0x1F);
   particleSensor.setPulseAmplitudeGreen(0);
 }
 
 void loop()
 {
-  if(WiFi.status() != WL_CONNECTED)
-  {
-    connectWiFi();
-  }
-
-  if(!Firebase.ready())
-  {
-    Serial.println("Firebase reconnecting...");
-    Firebase.begin(&config,&auth);
-  }
-
   float temp = dht.readTemperature();
   float hum = dht.readHumidity();
-
   int gas = analogRead(MQ135_PIN);
 
-  long irValue = particleSensor.getIR();
-  long redValue = particleSensor.getRed();
+  // Collect MAX30102 samples
+  for (byte i = 0; i < BUFFER_SIZE; i++) {
+    while (particleSensor.available() == false)
+      particleSensor.check();
 
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+  }
+
+  // Calculate HR and SpO2
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer,
+    BUFFER_SIZE,
+    redBuffer,
+    &spo2,
+    &validSPO2,
+    &heartRate,
+    &validHeartRate
+  );
+
+  int bpm = 0;
+  int oxygen = 0;
   bool bodyPresent = false;
 
-  if(irValue > 50000)
-  {
+  if (validHeartRate && validSPO2) {
+    bpm = heartRate;
+    oxygen = spo2;
     bodyPresent = true;
-
-    if(checkForBeat(irValue))
-    {
-      long delta = millis() - lastBeat;
-      lastBeat = millis();
-
-      beatsPerMinute = 60 / (delta / 1000.0);
-
-      if(beatsPerMinute < MAX_HR_VALUE && beatsPerMinute > MIN_HR_VALUE)
-      {
-        rates[rateSpot++] = (byte)beatsPerMinute;
-        rateSpot %= RATE_SIZE;
-
-        beatAvg = 0;
-
-        for(byte i=0;i<RATE_SIZE;i++)
-        beatAvg += rates[i];
-
-        beatAvg /= RATE_SIZE;
-      }
-    }
-
-    if(redValue > 15000 && irValue > 15000)
-    {
-      spo2 = 100 - 5 * ((float)redValue / (float)irValue);
-    }
-  }
-  else
-  {
-    beatAvg = 0;
-    spo2 = 0;
   }
 
-  Serial.printf(
-  "T:%.1f H:%.1f Gas:%d HR:%d SpO2:%.1f\n",
-  temp,hum,gas,beatAvg,spo2);
+  Serial.printf("T:%.1f H:%.0f G:%d HR:%d SpO2:%d\n",
+                temp,
+                hum,
+                gas,
+                bpm,
+                oxygen);
 
-  if(Firebase.ready())
-  {
-    Firebase.RTDB.setFloat(&fbdo,"/sensors/temperature",temp);
-    Firebase.RTDB.setFloat(&fbdo,"/sensors/humidity",hum);
-    Firebase.RTDB.setInt(&fbdo,"/sensors/gas",gas);
-    Firebase.RTDB.setInt(&fbdo,"/sensors/heartRate",beatAvg);
-    Firebase.RTDB.setFloat(&fbdo,"/sensors/spo2",spo2);
-    Firebase.RTDB.setBool(&fbdo,"/sensors/bodyPresent",bodyPresent);
-
-    Serial.println("Firebase Updated");
+  // Send to Firebase
+  if (Firebase.ready() && firebaseReady) {
+    Firebase.RTDB.setFloat(&fbdo, "/sensors/temperature", isnan(temp) ? 0 : temp);
+    Firebase.RTDB.setFloat(&fbdo, "/sensors/humidity", isnan(hum) ? 0 : hum);
+    Firebase.RTDB.setInt(&fbdo, "/sensors/gas", gas);
+    Firebase.RTDB.setInt(&fbdo, "/sensors/heartRate", bpm);
+    Firebase.RTDB.setInt(&fbdo, "/sensors/spo2", oxygen);
+    Firebase.RTDB.setBool(&fbdo, "/sensors/bodyPresent", bodyPresent);
   }
 
-  delay(2000);
+  delay(500);
 }
